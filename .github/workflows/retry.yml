@@ -1,9 +1,11 @@
 name: Crear máquina de Oracle
 
+# Cada corrida prueba crear la máquina cada ~3,5 minutos durante ~5,5 horas y, si todavía no salió,
+# se vuelve a lanzar sola. El reloj de GitHub ("schedule") queda de respaldo por si la cadena se corta.
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
+  schedule:
+    - cron: '17 * * * *'
 
 permissions:
   actions: write
@@ -17,10 +19,10 @@ concurrency:
 jobs:
   retry:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 350
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - run: pip install --quiet oci
@@ -32,12 +34,16 @@ jobs:
           OCI_REGION: ${{ vars.OCI_REGION }}
           OCI_STACK_ID: ${{ vars.OCI_STACK_ID }}
           OCI_KEY: ${{ secrets.OCI_KEY }}
-        run: python retry.py
-      # Salió: avisa con un issue (llega por mail) y apaga esta tarea.
+        run: python retry.py loop 330 210
+      # Salió: avisa con un issue (llega por mail, sin datos de la máquina) y apaga esta tarea.
       - if: steps.try.outputs.done == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          IP: ${{ steps.try.outputs.ip }}
         run: |
-          gh issue create --repo "$GITHUB_REPOSITORY" --title "¡La máquina de Oracle está lista! IP: $IP" --body "La máquina Pelacord se creó. IP pública: $IP"
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "¡La máquina de Oracle está lista!" --body "La máquina Pelacord se creó. Avisale a Claude para que siga."
           gh workflow disable retry.yml --repo "$GITHUB_REPOSITORY"
+      # No salió todavía: se vuelve a lanzar.
+      - if: steps.try.outputs.done != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run retry.yml --repo "$GITHUB_REPOSITORY" --ref main

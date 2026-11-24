@@ -13,6 +13,7 @@ opcional, OCI_STACK_ID y OCI_INSTANCE_NAME. En la PC, si no están, usa ~/.oci/c
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 import oci
 
@@ -93,23 +94,21 @@ def main():
     instance = find_instance(compute, tenancy)
     if instance:
         ip = ensure_public_ip(cfg, compute, instance)
-        print(f'La máquina ya existe ({instance.lifecycle_state}). IP pública: {ip}')
-        output(done='true', ip=ip or '')
-        return
+        print(f'La máquina ya existe ({instance.lifecycle_state}) y tiene IP pública: {bool(ip)}')
+        output(done='true')
+        return True
 
     stack_id = find_stack(rm, tenancy)
     jobs = rm.list_jobs(stack_id=stack_id, sort_by='TIMECREATED', sort_order='DESC', limit=1).data
     if jobs and jobs[0].lifecycle_state in ('ACCEPTED', 'IN_PROGRESS'):
         print('Hay un intento en curso; espero al próximo turno.')
-        output(done='false')
-        return
+        return False
 
     job = rm.create_job(oci.resource_manager.models.CreateJobDetails(
         stack_id=stack_id,
         display_name=f'auto-retry-{int(time.time())}',
         job_operation_details=oci.resource_manager.models.CreateApplyJobOperationDetails(execution_plan_strategy='AUTO_APPROVED'),
     )).data
-    print('Intento lanzado:', job.id)
     deadline = time.time() + 240
     state = job.lifecycle_state
     while time.time() < deadline:
@@ -117,15 +116,35 @@ def main():
         state = rm.get_job(job.id).data.lifecycle_state
         if state in ('SUCCEEDED', 'FAILED', 'CANCELED'):
             break
-    print('Resultado:', state)
+    stamp = datetime.now(timezone.utc).strftime('%H:%M UTC')
+    print(f'[{stamp}] Resultado: {state}' + (' (sin lugar, sigo probando)' if state == "FAILED" else ''))
     if state == 'SUCCEEDED':
         instance = find_instance(compute, tenancy)
         ip = ensure_public_ip(cfg, compute, instance) if instance else None
-        print('¡Máquina creada! IP pública:', ip)
-        output(done='true', ip=ip or '')
-    else:
-        output(done='false')
+        print('¡Máquina creada! Tiene IP pública:', bool(ip))
+        output(done='true')
+        return True
+    return False
+
+
+def loop(minutes, every):
+    """Prueba cada `every` segundos durante `minutes` minutos (o hasta que salga)."""
+    end = time.time() + minutes * 60
+    while True:
+        try:
+            if main():
+                return
+        except Exception as error:  # un error de red no corta el ciclo
+            print('Error en el intento:', type(error).__name__, str(error)[:200])
+        if time.time() + every > end:
+            print('Se terminó el tiempo de esta corrida; la próxima sigue.')
+            output(done='false')
+            return
+        time.sleep(every)
 
 
 if __name__ == '__main__':
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == 'loop':
+        loop(float(sys.argv[2]) if len(sys.argv) > 2 else 330, float(sys.argv[3]) if len(sys.argv) > 3 else 210)
+    else:
+        main()
